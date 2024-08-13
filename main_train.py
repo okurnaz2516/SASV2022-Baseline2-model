@@ -9,168 +9,147 @@ from dataset import *
 from torch.utils.data import DataLoader
 from metrics import get_all_EERs_my
 
-def initParams():
-    parser = argparse.ArgumentParser(description="SASV2022_ProductRule.")
 
-    parser.add_argument('--seed', type=int, help="random number seed", default=688)
+batch_size = 1024
+lr = 0.001
+epoch_size = 50
+weight_decay = 1e-5
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+trn_set = SASV_Dataset("trn")
+trn_loader = DataLoader(trn_set, batch_size=batch_size, shuffle=True,
+                        drop_last=False, pin_memory=True)
 
-    parser.add_argument('-m', '--model_name', help='Model arch', default='pr_s_f',
-                        choices=['baseline1', 'baseline2',
-                                 'pr_l_i', 'pr_s_i', 'pr_c_i', 'pr_l_f', 'pr_s_f',
-                                 'baseline1_l_i', 'baseline1_s_i'])
-
-    # Output folder prepare
-    parser.add_argument(
-        "-o", "--output_dir", dest="output_dir", type=str,
-        help="output directory for results", required=True,
-        default="./exp_result",
-    )
-    parser.add_argument("--gpu", type=str, help="GPU index", default="1")
-
-    # Dataset prepare
-    parser.add_argument("--embedding_dir", type=str, default="./embeddings/",
-                        help="folder for the pretrained ASV and CM embeddings")
-    parser.add_argument("--spk_meta_dir", type=str, default="./spk_meta/",
-                        help="folder for the speaker meta information")
-    parser.add_argument("--sasv_dev_trial", type=str,
-                        default="protocols/ASVspoof2019.LA.asv.dev.gi.trl.txt")
-    parser.add_argument("--sasv_eval_trial", type=str,
-                        default="protocols/ASVspoof2019.LA.asv.eval.gi.trl.txt")
-    parser.add_argument("--cm_trn_list", type=str,
-                        default="protocols/ASVspoof2019.LA.cm.train.trn.txt")
-    parser.add_argument("--cm_dev_list", type=str,
-                        default="protocols/ASVspoof2019.LA.cm.dev.trl.txt")
-    parser.add_argument("--cm_eval_list", type=str,
-                        default="protocols/ASVspoof2019.LA.cm.eval.trl.txt")
-
-    ## Training hyperparameters
-    parser.add_argument('--num_epochs', type=int, default=200, help="Number of epochs for training")
-    parser.add_argument('--batch_size', type=int, default=1024,
-                        help="Mini batch size for training")
-    parser.add_argument('--num_workers', type=int, default=0, help="number of workers")
-    parser.add_argument('--lr', type=float, default=0.0003, help="learning rate")
-    parser.add_argument('--clip_norm', type=int, default=None, help="clip norm for training")
-    parser.add_argument('--eps', type=float, default=1e-8, help="epsilon for computation")
-    parser.add_argument('--cudnn_deterministic_toggle', type=str2bool, nargs='?', const=True, default=True)
-    parser.add_argument('--cudnn_benchmark_toggle', type=str2bool, nargs='?', const=True, default=False)
-
-    parser.add_argument('--test_only', action='store_true',
-                        help="test the trained model in case the test crash sometimes or another test method")
-
-    args = parser.parse_args()
-
-    # Change this to specify GPU
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-
-    # Set seeds
-    set_seed(args)
-
-    # generate speaker-utterance meta information
-    assert (
-            os.path.exists(args.spk_meta_dir + "spk_meta_trn.pk")
-            and os.path.exists(args.spk_meta_dir + "spk_meta_dev.pk")
-            and os.path.exists(args.spk_meta_dir + "spk_meta_eval.pk")
-    )
-
-    if args.test_only:
-        pass
-    else:
-        # Path for output data
-        if not os.path.exists(args.output_dir):
-            os.makedirs(args.output_dir)
-        else:
-            shutil.rmtree(args.output_dir)
-            os.mkdir(args.output_dir)
-
-        # Folder for intermediate results
-        if not os.path.exists(os.path.join(args.output_dir, 'checkpoints')):
-            os.makedirs(os.path.join(args.output_dir, 'checkpoints'))
-        else:
-            shutil.rmtree(os.path.join(args.output_dir, 'checkpoints'))
-            os.mkdir(os.path.join(args.output_dir, 'checkpoints'))
-
-        # Save training arguments
-        with open(os.path.join(args.output_dir, 'args.json'), 'w') as file:
-            file.write(json.dumps(vars(args), sort_keys=True, separators=('\n', ':')))
-
-    args.cuda = torch.cuda.is_available()
-    print('Cuda device available: ', args.cuda)
-    args.device = torch.device("cuda" if args.cuda else "cpu")
-
-    return args
-
-def train(args):
-    if "pr" in args.model_name:
-        mapping_dict = {"l": "linear", "s": "sigmoid", "c": None}
-        trainable_dict = {"i": False, "f": True}
-        if "c" in args.model_name:
-            f = open("./calibrator/sv_sigmoid.pk", 'rb')
-            calibrator = pkl.load(f)
-        else:
-            calibrator = None
-        model = Parallel_PR(trainable=trainable_dict[args.model_name[-1]], calibrator=calibrator,
-                            map_function=mapping_dict[args.model_name[-3]])
-    elif "baseline1_" in args.model_name:
-        mapping_dict = {"l": "linear", "s": "sigmoid"}
-        model = Baseline1_improved(map_function=mapping_dict[args.model_name[-3]])
-    elif args.model_name == "baseline1":
-        model = Baseline1()
-    elif args.model_name == "baseline2":
-        model = Baseline2(num_nodes=[256, 128, 64])
-    else:
-        raise ValueError("Which model do you want to use?")
-    set_init_weights(model)
-    trainer = Trainer(args, model)
-    trainer.run_train()
-
-    return trainer
-
-def evaluate_one_iter(args, model, data_minibatch):
-    asv1, asv2, cm2, ans, key = data_minibatch
-    if torch.cuda.is_available():
-        asv1 = asv1.to(args.device)
-        asv2 = asv2.to(args.device)
-        cm2 = cm2.to(args.device)
-
-    pred = model(asv1, asv2, cm2)
-
-    return {"pred": pred, "key": key}
-
-def evaluate_on_set(args, model, set):
-    model.eval()
-    evaluation_set = SASV_Dataset(args, set)
-    eval_loader = DataLoader(evaluation_set, batch_size=args.batch_size, shuffle=False,
-                             num_workers=args.num_workers, drop_last=False, pin_memory=True)
+model = Baseline2()
+model.to(device)
+params = list(model.parameters())
+optimizer = optim.Adam(params, lr=lr, weight_decay=weight_decay)
+model.train()
+min_eer = 1e4
+for epoch in range(epoch_size):
     preds, keys = [], []
+    trn_loss = 0
+    tot_batch_trn = len(trn_loader)
+    for num, data_minibatch in enumerate(trn_loader, 0):
+        asv1, asv2, cm1, ans, key = data_minibatch
+        with torch.set_grad_enabled(True):
+            if torch.cuda.is_available():
+                asv1 = asv1.to(device)
+                asv2 = asv2.to(device)
+                cm1 = cm1.to(device)
+                ans = ans.to(device)
+
+            pred = model(asv1, asv2, cm1)
+            nloss = model.calc_loss(pred, ans)
+            trn_loss += nloss
+            optimizer.zero_grad()
+            nloss.backward()
+            optimizer.step()
+            pred = torch.softmax(pred, dim=-1)
+            preds.append(pred)
+            keys.extend(list(key))
+
+    preds = torch.cat(preds, dim=0)[:, 1].detach().cpu().numpy()
+
+    trn_loss = (trn_loss/tot_batch_trn).item()
+    sasv_eer_trn, sv_eer_trn, spf_eer_trn = get_all_EERs(
+        preds=preds, keys=keys)
+
+    print("\nEpoch-%d Trn: Loss: %0.5f, sasv_eer_trn: %0.3f, sv_eer_trn: %0.3f, spf_eer_trn: %0.3f" % (
+        epoch+1,  trn_loss, 100 * sasv_eer_trn, 100 * sv_eer_trn, 100 * spf_eer_trn))
+
+    model.eval()
+    dev_set = SASV_Dataset("dev")
+    dev_loader = DataLoader(dev_set, batch_size=batch_size, shuffle=True,
+                            drop_last=False, pin_memory=True)
     with torch.no_grad():
-        for num, data_slice in enumerate(eval_loader):
-            output = evaluate_one_iter(args, model, data_slice)
-            preds.append(output["pred"])
-            keys.extend(list(output["key"]))
-        if args.model_name == "baseline" or args.model_name == "baseline2":
-            preds = torch.cat(preds, dim=0)[:, 1].detach().cpu().numpy()
-        else:
-            preds = torch.cat(preds, dim=0).detach().cpu().numpy()
+        preds, keys = [], []
+        for num, data_minibatch in enumerate(dev_loader, 0):
+            asv1, asv2, cm1, ans, key = data_minibatch
+            if torch.cuda.is_available():
+                asv1 = asv1.to(device)
+                asv2 = asv2.to(device)
+                cm1 = cm1.to(device)
+                ans = ans.to(device)
 
-        with open(os.path.join(args.output_dir, set + '_preds.pkl'), 'wb') as handle:
-            pkl.dump(preds, handle, protocol=pkl.HIGHEST_PROTOCOL)
-        with open(os.path.join(args.output_dir, set + '_keys.pkl'), 'wb') as handle:
-            pkl.dump(keys, handle, protocol=pkl.HIGHEST_PROTOCOL)
+            pred = model(asv1, asv2, cm1)
+            nloss = model.calc_loss(pred, ans)
+            pred = torch.softmax(pred, dim=-1)
+            preds.append(pred)
+            keys.extend(list(key))
 
-        sasv_eer, sv_eer, spf_eer = get_all_EERs_my(preds=preds, keys=keys)
-        print("sasv_eer_" + set + ": %0.3f, sv_eer_" % (100 * sasv_eer) + set +
-              ": %0.3f, spf_eer_" % (100 * sv_eer) + set + ": %0.3f" % (100 * spf_eer))
+        preds = torch.cat(preds, dim=0)[:, 1].detach().cpu().numpy()
 
-def evaluate(args, model):
-    print("\nFinal evaluation for the best epoch:")
-    evaluate_on_set(args, model, "dev")
-    evaluate_on_set(args, model, "eval")
+        sasv_eer_dev, sv_eer_dev, spf_eer_dev = get_all_EERs(
+            preds=preds, keys=keys)
+
+        print("Epoch-%d Dev: sasv_eer_dev: %0.3f, sv_eer_dev: %0.3f, spf_eer_dev: %0.3f" % (
+            epoch+1, 100 * sasv_eer_dev, 100 * sv_eer_dev, 100 * spf_eer_dev))
+
+    if sasv_eer_dev < min_eer:
+        torch.save(model.state_dict(), os.path.join(
+            output_dir, "%s_best.pt" % (model.name)))
+        min_eer = sasv_eer_dev
+        best_epoch = epoch
+        # print(f'Epoch-{epoch+1} Min sasv_eer: %{min_eer*100:.4f}')
+
+print(
+    f'\nMin sasv_eer_dev: %{min_eer*100:.4f} obtained in epoch {best_epoch+1}')
 
 
-if __name__ == '__main__':
-    args = initParams()
-    if not args.test_only:
-        train(args)
-    model = torch.load(glob.glob(os.path.join(args.output_dir, "*_best.pt"))[-1])
-    evaluate(args, model)
+model.load_state_dict(torch.load(os.path.join(
+    output_dir, "%s_best.pt" % (model.name))))
+model.eval()
+dev_set = SASV_Dataset("dev")
+dev_loader = DataLoader(dev_set, batch_size=len(dev_set), shuffle=False,
+                        drop_last=False, pin_memory=True)
 
+with torch.no_grad():
+    preds, keys = [], []
+    for num, data_minibatch in enumerate(dev_loader, 0):
+        asv1, asv2, cm1, ans, key = data_minibatch
+        if torch.cuda.is_available():
+            asv1 = asv1.to(device)
+            asv2 = asv2.to(device)
+            cm1 = cm1.to(device)
+            ans = ans.to(device)
+
+        pred = model(asv1, asv2, cm1)
+        nloss = model.calc_loss(pred, ans)
+        pred = torch.softmax(pred, dim=-1)
+        preds.append(pred)
+        keys.extend(list(key))
+
+    preds = torch.cat(preds, dim=0)[:, 1].detach().cpu().numpy()
+
+    sasv_eer_dev, sv_eer_dev, spf_eer_dev = get_all_EERs(
+        preds=preds, keys=keys)
+    print("\nEpoch-%d Dev: sasv_eer_dev: %0.3f, sv_eer_dev: %0.3f, spf_eer_dev: %0.3f" % (
+        epoch+1, 100 * sasv_eer_dev, 100 * sv_eer_dev, 100 * spf_eer_dev))
+
+
+eval_set = SASV_Dataset("eval")
+eval_loader = DataLoader(eval_set, batch_size=len(eval_set), shuffle=False,
+                          drop_last=False, pin_memory=True)
+
+with torch.no_grad():
+    preds, keys = [], []
+    for num, data_minibatch in enumerate(eval_loader, 0):
+        asv1, asv2, cm1, ans, key = data_minibatch
+        if torch.cuda.is_available():
+            asv1 = asv1.to(device)
+            asv2 = asv2.to(device)
+            cm1 = cm1.to(device)
+            ans = ans.to(device)
+
+        pred = model(asv1, asv2, cm1)
+        nloss = model.calc_loss(pred, ans)
+        pred = torch.softmax(pred, dim=-1)
+        preds.append(pred)
+        keys.extend(list(key))
+
+    preds = torch.cat(preds, dim=0)[:, 1].detach().cpu().numpy()
+
+    sasv_eer_eval, sv_eer_eval, spf_eer_eval = get_all_EERs(
+        preds=preds, keys=keys)
+    print("\nEpoch-%d Eval: sasv_eer_eval: %0.3f, sv_eer_eval: %0.3f, spf_eer_eval: %0.3f" % (
+        epoch+1, 100 * sasv_eer_eval, 100 * sv_eer_eval, 100 * spf_eer_eval))
