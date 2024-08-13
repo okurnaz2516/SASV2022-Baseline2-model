@@ -3,15 +3,16 @@ import pickle as pk
 from torch.utils.data import Dataset
 
 
+
 class SASV_Dataset(Dataset):
-    def __init__(self, args, partition):
+    def __init__(self, partition):
         self.part = partition
-        self.embedding_dir = args.embedding_dir
+        self.embedding_dir = embedding_dir
         if self.part == "trn":
-            self.spk_meta_dir = args.spk_meta_dir
+            self.spk_meta_dir = spk_meta_dir
             self.load_meta_information()
         else:
-            sasv_trial = getattr(args, 'sasv_' + self.part + '_trial')
+            sasv_trial = file_path + "protocols/ASVspoof2019.LA.asv." + self.part + ".gi.trl.txt"
             with open(sasv_trial, "r") as f:
                 self.utt_list = f.readlines()
         self.load_embeddings()
@@ -47,12 +48,14 @@ class SASV_Dataset(Dataset):
             spk = random.choice(list(self.spk_meta.keys()))
             enr, tst = random.sample(self.spk_meta[spk]["bonafide"], 2)
             nontarget_type = 0
+            ans = 'target'
         elif ans_type == 0:  # nontarget
             nontarget_type = random.randint(1, 2)
             if nontarget_type == 1:  # zero-effort nontarget
-                spk, ze_spk = random.sample(self.spk_meta.keys(), 2)
+                spk, ze_spk = random.sample(list(self.spk_meta.keys()), 2)
                 enr = random.choice(self.spk_meta[spk]["bonafide"])
                 tst = random.choice(self.spk_meta[ze_spk]["bonafide"])
+                ans = 'nontarget'
 
             if nontarget_type == 2:  # spoof nontarget
                 spk = random.choice(list(self.spk_meta.keys()))
@@ -63,27 +66,28 @@ class SASV_Dataset(Dataset):
                             break
                 enr = random.choice(self.spk_meta[spk]["bonafide"])
                 tst = random.choice(self.spk_meta[spk]["spoof"])
+                ans = 'spoof'
         else:
             raise ValueError
 
         return self.asv_embd[enr], self.asv_embd[tst], \
-               self.cm_embd[tst], ans_type, nontarget_type
+               self.cm_embd[tst], ans_type, ans
 
     def getitem_dev(self, index):
         line = self.utt_list[index]
         spkmd, key, _, ans = line.strip().split(" ")
         ans_type = int(ans == "target")
-        nontype_dict = {"target": 0, "nontarget": 1, "spoof": 2}
 
         return self.spk_model[spkmd], self.asv_embd[key], \
-               self.cm_embd[key], ans_type, nontype_dict[ans]
+               self.cm_embd[key], ans_type, ans
 
     def getitem_eval(self, index):
         line = self.utt_list[index]
         spkmd, key, _, ans = line.strip().split(" ")
         ans_type = int(ans == "target")
-        nontype_dict = {"target": 0, "nontarget": 1, "spoof": 2}
 
         return self.spk_model[spkmd], self.asv_embd[key], \
-               self.cm_embd[key], ans_type, nontype_dict[ans]
+               self.cm_embd[key], ans_type, ans
+
+
 
